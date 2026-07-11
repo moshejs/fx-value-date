@@ -1,0 +1,55 @@
+{
+  "name": "fx-value-date",
+  "version": "1.0.0",
+  "description": "FX settlement / value-date calculation — spot (T+2 / T+1), tom, forward tenors across two currency holiday calendars, with the USD intermediate-day rule, modified-following, and end-of-month. Zero dependencies (calendars injected).",
+  "keywords": [
+    "fx",
+    "forex",
+    "value-date",
+    "settlement-date",
+    "spot",
+    "forward",
+    "trade-date",
+    "business-day",
+    "currency",
+    "foreign-exchange",
+    "finance"
+  ],
+  "homepage": "https://moshemalka.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moshejs/fx-value-date.git"
+  },
+  "bugs": "https://github.com/moshejs/fx-value-date/issues",
+  "author": "Moshe Malka <hello@moshemalka.com> (https://moshemalka.com)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
