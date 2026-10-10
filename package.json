@@ -1,6 +1,6 @@
 {
   "name": "fx-value-date",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "FX settlement / value-date calculation — spot (T+2 / T+1), tom, forward tenors across two currency holiday calendars, with per-currency spot counting, the USD T+1 rule, modified-following, and the end-end rule. Zero dependencies (calendars injected).",
   "keywords": [
     "fx",
