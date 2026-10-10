@@ -1,7 +1,7 @@
 {
   "name": "fx-value-date",
   "version": "1.0.0",
-  "description": "FX settlement / value-date calculation — spot (T+2 / T+1), tom, forward tenors across two currency holiday calendars, with the USD intermediate-day rule, modified-following, and end-of-month. Zero dependencies (calendars injected).",
+  "description": "FX settlement / value-date calculation — spot (T+2 / T+1), tom, forward tenors across two currency holiday calendars, with per-currency spot counting, the USD T+1 rule, modified-following, and the end-end rule. Zero dependencies (calendars injected).",
   "keywords": [
     "fx",
     "forex",
@@ -26,13 +26,19 @@
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./dist/index.d.cts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
-    }
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist"

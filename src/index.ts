@@ -2,9 +2,11 @@
  * fx-value-date — FX settlement / value-date calculation.
  *
  * Spot (T+2, with the T+1 special cases), tom, spot-next, and forward tenor
- * value dates across TWO currency holiday calendars, applying the USD
- * intermediate-holiday rule, the modified-following business-day adjustment,
- * and the end-of-month rule.
+ * value dates across TWO currency holiday calendars, following the market
+ * conventions: each currency counts its own business days to spot (USD needs
+ * only one clear day, so a USD holiday on T+1 does not delay a USD pair), the
+ * spot date must be good for both currencies (and for USD on a cross),
+ * forwards roll modified-following with the end-end rule.
  *
  * Zero dependencies: you inject each currency's holiday calendar as a
  * predicate (e.g. wrap `date-holidays`, or pass a Set of dates). Dates are
@@ -22,8 +24,9 @@ export interface Calendars {
   /** Quote-currency holiday calendar. */
   quote: HolidayCalendar;
   /**
-   * USD holiday calendar, used for the intermediate-day rule when neither
-   * side of the pair is USD. Optional; defaults to weekends-only.
+   * USD holiday calendar, used when neither side of the pair is USD: a
+   * cross's value date may not be a USD holiday. Also used for the T+1 check
+   * on MXN, CLP and ARS. Optional; defaults to weekends-only.
    */
   usd?: HolidayCalendar;
 }
@@ -95,11 +98,14 @@ function isJointBusinessDay(a: YMD, base: HolidayCalendar, quote: HolidayCalenda
   return isBusinessDay(a, base) && isBusinessDay(a, quote);
 }
 
+/** Pairs that settle T+1 (either orientation). */
+const T1_CURRENCIES_VS_USD = new Set(["CAD", "TRY", "PHP", "RUB"]);
+
 /**
- * Spot lag for a pair: T+1 for USD/CAD, USD/TRY, USD/PHP, USD/RUB and the
- * "same-day/next-day" majors; T+2 otherwise. Override via {@link SpotOptions}.
+ * Currencies whose T+1 day must also be a USD business day (two clear USD
+ * days to spot), per market convention for these Latin American currencies.
  */
-const T1_PAIRS = new Set(["USD/CAD", "USD/TRY", "USD/PHP", "USD/RUB", "CAD/USD"]);
+const USD_T1_CURRENCIES = new Set(["MXN", "CLP", "ARS"]);
 
 export interface SpotOptions extends Calendars {
   /** Override the spot lag in business days (default: 1 for T+1 pairs, else 2). */
@@ -110,20 +116,89 @@ export interface SpotOptions extends Calendars {
   pair: string;
 }
 
-/** How many business days after trade date the pair settles spot (1 or 2). */
+/**
+ * How many business days after trade date the pair settles spot: 1 for
+ * USD/CAD, USD/TRY, USD/PHP and USD/RUB (either orientation), else 2.
+ */
 export function spotLag(pair: string): number {
   const { base, quote } = parsePairCurrencies(pair);
-  return T1_PAIRS.has(`${base}/${quote}`) ? 1 : 2;
+  const other = base === "USD" ? quote : quote === "USD" ? base : null;
+  return other !== null && T1_CURRENCIES_VS_USD.has(other) ? 1 : 2;
+}
+
+interface PairContext {
+  baseCcy: string;
+  quoteCcy: string;
+  base: HolidayCalendar;
+  quote: HolidayCalendar;
+  usd: HolidayCalendar;
+  /** Neither side is USD. */
+  cross: boolean;
+}
+
+function pairContext(opts: { pair: string } & Calendars): PairContext {
+  const { base: baseCcy, quote: quoteCcy } = parsePairCurrencies(opts.pair);
+  const usd =
+    baseCcy === "USD" ? opts.base : quoteCcy === "USD" ? opts.quote : (opts.usd ?? WEEKENDS_ONLY);
+  return { baseCcy, quoteCcy, base: opts.base, quote: opts.quote, usd, cross: baseCcy !== "USD" && quoteCcy !== "USD" };
+}
+
+/** A valid value date: good for both currencies, and for USD on a cross. */
+function isValueDate(a: YMD, ctx: PairContext): boolean {
+  return isJointBusinessDay(a, ctx.base, ctx.quote) && (!ctx.cross || isBusinessDay(a, ctx.usd));
+}
+
+function addGoodDays(a: YMD, n: number, good: (x: YMD) => boolean): YMD {
+  let cur = a;
+  for (let i = 0; i < n; i++) {
+    cur = addDays(cur, 1);
+    while (!good(cur)) cur = addDays(cur, 1);
+  }
+  return cur;
+}
+
+function nextValueDate(a: YMD, ctx: PairContext): YMD {
+  let cur = addDays(a, 1);
+  while (!isValueDate(cur, ctx)) cur = addDays(cur, 1);
+  return cur;
+}
+
+function rollToValueDate(a: YMD, ctx: PairContext): YMD {
+  let cur = a;
+  while (!isValueDate(cur, ctx)) cur = addDays(cur, 1);
+  return cur;
+}
+
+function spotYMD(trade: YMD, lag: number, ctx: PairContext): YMD {
+  // Each currency counts its own clear business days from the trade date:
+  // USD needs lag − 1 (one clear day for T+2), every other currency needs
+  // `lag`, and MXN/CLP/ARS count on their calendar AND USD's. The later of
+  // the two legs, rolled forward to a valid value date, is spot.
+  const leg = (ccy: string, cal: HolidayCalendar): YMD => {
+    if (ccy === "USD") return addGoodDays(trade, Math.max(lag - 1, 0), (x) => isBusinessDay(x, cal));
+    const withUsd = USD_T1_CURRENCIES.has(ccy);
+    return addGoodDays(trade, lag, (x) => isBusinessDay(x, cal) && (!withUsd || isBusinessDay(x, ctx.usd)));
+  };
+  const a = leg(ctx.baseCcy, ctx.base);
+  const b = leg(ctx.quoteCcy, ctx.quote);
+  return rollToValueDate(iso(a) > iso(b) ? a : b, ctx);
+}
+
+function lagFor(opts: SpotOptions): number {
+  const lag = opts.spotLag ?? spotLag(opts.pair);
+  if (!Number.isInteger(lag) || lag < 0) throw new RangeError(`spotLag must be an integer ≥ 0, got ${lag}`);
+  return lag;
 }
 
 /**
  * The spot value date for a pair.
  *
- * The rule: advance `spotLag` (usually 2) currency-business days from the
- * trade date on BOTH legs' calendars. For the intermediate day of a T+2
- * cross where neither currency is USD, the day must additionally be a USD
- * business day (the "USD must be good on T+1" rule); it need not be a
- * settlement day. The final value date must be a joint business day.
+ * Each currency counts its own business days from the trade date: two for
+ * most currencies, but only one for USD, so a USD holiday on T+1 does not
+ * delay EUR/USD. (MXN, CLP and ARS are the exception: their T+1 must also be
+ * a USD business day.) The later of the two dates is then rolled forward
+ * until it is a business day for both currencies — and for USD too when the
+ * pair is a cross, since a cross may not settle on a USD holiday.
  *
  * ```ts
  * // trade Wed 2026-07-01; T+2 would land on Fri Jul 3 (US Independence Day
@@ -133,35 +208,14 @@ export function spotLag(pair: string): number {
  * ```
  */
 export function spotValueDate(opts: SpotOptions): string {
-  const { base, quote } = opts;
-  const usd = opts.usd ?? WEEKENDS_ONLY;
-  const { base: baseCcy, quote: quoteCcy } = parsePairCurrencies(opts.pair);
-  const lag = opts.spotLag ?? spotLag(opts.pair);
-  if (!Number.isInteger(lag) || lag < 0) throw new RangeError(`spotLag must be ≥ 0, got ${lag}`);
-
-  const usdInvolved = baseCcy === "USD" || quoteCcy === "USD";
-  let cur = toYMD(opts.tradeDate, "tradeDate");
-
-  // Step through `lag` business days. Intermediate days need only be joint
-  // business days; when USD is not in the pair, they must also be USD-good.
-  let stepped = 0;
-  while (stepped < lag) {
-    cur = addDays(cur, 1);
-    const jointOk = isJointBusinessDay(cur, base, quote);
-    if (!jointOk) continue;
-    // For non-USD crosses, an intermediate day must be a USD business day.
-    if (!usdInvolved && stepped < lag - 1 && !isBusinessDay(cur, usd)) continue;
-    stepped++;
-  }
-  // Ensure the final value date is a joint business day (roll forward if not —
-  // e.g. a USD holiday on the value date of a EUR/GBP cross).
-  while (!isJointBusinessDay(cur, base, quote) || (!usdInvolved && !isBusinessDay(cur, usd))) {
-    cur = addDays(cur, 1);
-  }
-  return iso(cur);
+  const ctx = pairContext(opts);
+  return iso(spotYMD(toYMD(opts.tradeDate, "tradeDate"), lagFor(opts), ctx));
 }
 
-/** The tom (tomorrow / T+1) value date: one joint business day after trade. */
+/**
+ * The tom (tomorrow) value date: the first valid value date one business day
+ * after trade (spot with a lag of 1).
+ */
 export function tomValueDate(opts: Omit<SpotOptions, "spotLag">): string {
   return spotValueDate({ ...opts, spotLag: 1 });
 }
@@ -214,50 +268,69 @@ const TENOR_RE = /^(\d+)(D|W|M|Y)$/;
 
 /**
  * The value date for a forward tenor, measured from spot (the market
- * convention). Week/day tenors add calendar days then adjust
- * modified-following; month/year tenors add months with the end-of-month
- * rule, then adjust modified-following on both calendars.
+ * convention). Day and week tenors add calendar days; month and year tenors
+ * add months. Either way the date is then adjusted modified-following onto a
+ * valid value date (good for both currencies, and USD on a cross).
  *
- * Also accepts the short-dated tenors "ON" (overnight, trade→T+1),
- * "TN" (tom-next), and "SN" (spot-next).
+ * End-end rule: when spot is the last valid value date of its month, a
+ * month/year forward is the last valid value date of the target month. A
+ * target day that does not exist (Jan 30 + 1M) is capped at the month end.
+ *
+ * Also accepts the short dates "ON" (overnight: value tom), "TN" (tom-next:
+ * value spot), and "SN" (spot-next: the value date after spot).
  */
 export function forwardValueDate(opts: ForwardOptions): string {
-  const { base, quote } = opts;
+  const ctx = pairContext(opts);
+  const trade = toYMD(opts.tradeDate, "tradeDate");
   const tenor = opts.tenor.trim().toUpperCase();
+  const lag = lagFor(opts);
+  const spot = spotYMD(trade, lag, ctx);
 
-  if (tenor === "ON") return tomValueDate(opts);
+  if (tenor === "ON") return iso(spotYMD(trade, 1, ctx));
   if (tenor === "TN") {
-    const tom = tomValueDate(opts);
-    return nextJointBusinessDay(tom, base, quote);
+    // Tom-next settles on spot; for T+1 pairs (tom = spot) it is the next day.
+    const tom = spotYMD(trade, 1, ctx);
+    return iso(iso(spot) > iso(tom) ? spot : nextValueDate(tom, ctx));
   }
-  const spot = spotValueDate(opts);
-  if (tenor === "SN") return nextJointBusinessDay(spot, base, quote);
+  if (tenor === "SN") return iso(nextValueDate(spot, ctx));
 
   const m = TENOR_RE.exec(tenor);
   if (!m) throw new RangeError(`Invalid tenor: "${opts.tenor}" (e.g. "1W", "3M", "1Y", "ON")`);
   const n = Number(m[1]);
   const unit = m[2];
 
-  const spotY = toYMD(spot);
   if (unit === "D" || unit === "W") {
-    const days = unit === "W" ? n * 7 : n;
-    return adjust(iso(addDays(spotY, days)), base, quote, "modified-following");
+    return iso(modifiedFollowing(addDays(spot, unit === "W" ? n * 7 : n), ctx));
   }
 
-  // Month / year tenor with the end-of-month rule.
   const months = unit === "M" ? n : n * 12;
-  const spotIsEom = spotY.d === lastDayOfMonth(spotY.y, spotY.m);
-  const total = spotY.y * 12 + (spotY.m - 1) + months;
+  const total = spot.y * 12 + (spot.m - 1) + months;
   const ty = Math.floor(total / 12);
   const tm = (total % 12) + 1;
-  const targetDay = spotIsEom ? lastDayOfMonth(ty, tm) : Math.min(spotY.d, lastDayOfMonth(ty, tm));
-  return adjust(iso({ y: ty, m: tm, d: targetDay }), base, quote, "modified-following");
+  const last = lastDayOfMonth(ty, tm);
+  if (isLastValueDateOfMonth(spot, ctx)) {
+    let d: YMD = { y: ty, m: tm, d: last };
+    while (!isValueDate(d, ctx)) d = addDays(d, -1);
+    return iso(d);
+  }
+  return iso(modifiedFollowing({ y: ty, m: tm, d: Math.min(spot.d, last) }, ctx));
 }
 
-function nextJointBusinessDay(date: DateInput, base: HolidayCalendar, quote: HolidayCalendar): string {
-  let cur = addDays(toYMD(date), 1);
-  while (!isJointBusinessDay(cur, base, quote)) cur = addDays(cur, 1);
-  return iso(cur);
+function isLastValueDateOfMonth(a: YMD, ctx: PairContext): boolean {
+  if (!isValueDate(a, ctx)) return false;
+  for (let d = addDays(a, 1); d.m === a.m; d = addDays(d, 1)) {
+    if (isValueDate(d, ctx)) return false;
+  }
+  return true;
+}
+
+function modifiedFollowing(a: YMD, ctx: PairContext): YMD {
+  let f = a;
+  while (!isValueDate(f, ctx)) f = addDays(f, 1);
+  if (f.m === a.m) return f;
+  let p = a;
+  while (!isValueDate(p, ctx)) p = addDays(p, -1);
+  return p;
 }
 
 /**
